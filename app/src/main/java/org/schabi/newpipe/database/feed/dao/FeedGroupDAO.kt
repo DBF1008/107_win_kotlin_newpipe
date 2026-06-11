@@ -30,6 +30,9 @@ abstract class FeedGroupDAO {
     @Update(onConflict = OnConflictStrategy.IGNORE)
     abstract fun update(feedGroupEntity: FeedGroupEntity): Int
 
+    @Query("SELECT uid FROM feed_group")
+    fun getAllGroupIds(): List<Long>
+
     @Query("DELETE FROM feed_group")
     abstract fun deleteAll(): Int
 
