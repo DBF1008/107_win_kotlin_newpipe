@@ -99,13 +99,25 @@ class ImportExportManager(private val fileLocator: BackupFileLocator) {
 
     /**
      * Remove all shared preferences from the app and load the preferences supplied to the manager.
+     *
+     * The import is atomic: on success the preferences are fully replaced with the backup contents
+     * (excluding [preferencesToRemove]); on failure an exception is thrown and the preferences are
+     * left unchanged (nothing is committed).
+     *
+     * @param preferencesToRemove keys that must not be imported from the backup (e.g. device
+     * specific settings). They are cleared and left at their default so the local device can decide
+     * their value afterwards.
      */
     @Deprecated(
         "Serializing preferences with Java's ObjectOutputStream is vulnerable to injections",
         replaceWith = ReplaceWith("loadJsonPrefs")
     )
     @Throws(IOException::class, ClassNotFoundException::class)
-    fun loadSerializedPrefs(zipFile: StoredFileHelper, preferences: SharedPreferences) {
+    fun loadSerializedPrefs(
+        zipFile: StoredFileHelper,
+        preferences: SharedPreferences,
+        preferencesToRemove: Collection<String> = emptyList()
+    ) {
         ZipHelper.extractFileFromZip(zipFile, BackupFileLocator.FILE_NAME_SERIALIZED_PREFS) {
             PreferencesObjectInputStream(it).use { input ->
                 @Suppress("UNCHECKED_CAST")
