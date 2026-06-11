@@ -75,6 +75,8 @@ abstract class FeedDAO {
             AND sst.progress_time <= s.duration * 1000 / 4)
             OR (sst.progress_time >= s.duration * 1000 - ${StreamStateEntity.PLAYBACK_FINISHED_END_MILLISECONDS}
             AND sst.progress_time >= s.duration * 1000 * 3 / 4)
+            OR s.stream_type = 'LIVE_STREAM'
+            OR s.stream_type = 'AUDIO_LIVE_STREAM'
         )
         AND (
             :uploadDateBefore IS NULL
@@ -162,7 +164,11 @@ abstract class FeedDAO {
 
     @Query(
         """
-        SELECT MIN(lu.last_updated) FROM feed_last_updated lu
+        SELECT CASE
+            WHEN COUNT(*) > COUNT(lu.last_updated) THEN NULL
+            ELSE MIN(lu.last_updated)
+        END
+        FROM feed_last_updated lu
 
         INNER JOIN feed_group_subscription_join fgs
         ON fgs.subscription_id = lu.subscription_id AND fgs.group_id = :groupId
@@ -170,7 +176,15 @@ abstract class FeedDAO {
     )
     abstract fun oldestSubscriptionUpdate(groupId: Long): Flowable<List<OffsetDateTime?>>
 
-    @Query("SELECT MIN(last_updated) FROM feed_last_updated")
+    @Query(
+        """
+        SELECT CASE
+            WHEN COUNT(*) > COUNT(last_updated) THEN NULL
+            ELSE MIN(last_updated)
+        END
+        FROM feed_last_updated
+        """
+    )
     abstract fun oldestSubscriptionUpdateFromAll(): Flowable<List<OffsetDateTime?>>
 
     @Query("SELECT COUNT(*) FROM feed_last_updated WHERE last_updated IS NULL")

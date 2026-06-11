@@ -309,6 +309,8 @@ class FeedLoadManager(private val context: Context) {
                                     }
                                 )
                                 feedDatabaseManager.markAsOutdated(info.uid)
+                            } else {
+                                feedDatabaseManager.markAsUpdated(info.uid)
                             }
                         }
 

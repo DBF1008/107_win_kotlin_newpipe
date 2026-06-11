@@ -76,6 +76,11 @@ class FeedDatabaseManager(context: Context) {
     fun markAsOutdated(subscriptionId: Long) = feedTable
         .setLastUpdatedForSubscription(FeedLastUpdatedEntity(subscriptionId, null))
 
+    fun markAsUpdated(subscriptionId: Long) = feedTable
+        .setLastUpdatedForSubscription(
+            FeedLastUpdatedEntity(subscriptionId, OffsetDateTime.now(ZoneOffset.UTC))
+        )
+
     fun doesStreamExist(stream: StreamInfoItem): Boolean {
         return streamTable.exists(stream.serviceId, stream.url)
     }
@@ -104,10 +109,6 @@ class FeedDatabaseManager(context: Context) {
 
             feedTable.insertAll(feedEntities)
         }
-
-        feedTable.setLastUpdatedForSubscription(
-            FeedLastUpdatedEntity(subscriptionId, OffsetDateTime.now(ZoneOffset.UTC))
-        )
     }
 
     fun removeOrphansOrOlderStreams(oldestAllowedDate: OffsetDateTime = FEED_OLDEST_ALLOWED_DATE) {

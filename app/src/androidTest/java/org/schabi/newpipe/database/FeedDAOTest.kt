@@ -8,15 +8,21 @@ import java.io.IOException
 import java.time.OffsetDateTime
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.schabi.newpipe.database.feed.dao.FeedDAO
 import org.schabi.newpipe.database.feed.model.FeedEntity
 import org.schabi.newpipe.database.feed.model.FeedGroupEntity
+import org.schabi.newpipe.database.feed.model.FeedLastUpdatedEntity
+import org.schabi.newpipe.database.history.model.StreamHistoryEntity
 import org.schabi.newpipe.database.stream.StreamWithState
 import org.schabi.newpipe.database.stream.dao.StreamDAO
 import org.schabi.newpipe.database.stream.model.StreamEntity
+import org.schabi.newpipe.database.stream.model.StreamStateEntity
 import org.schabi.newpipe.database.subscription.SubscriptionDAO
 import org.schabi.newpipe.database.subscription.SubscriptionEntity
 import org.schabi.newpipe.extractor.ServiceList
@@ -139,4 +145,140 @@ class FeedDAOTest {
             )
         )
     }
+
+    /**
+     * Regression for defect A: a live stream must stay visible in the feed regardless of the
+     * "show played" / "show partially played" filters. Previously the second filter block
+     * (`includePartiallyPlayed`) lacked the live-stream exemption that the first block had, so a
+     * live stream with a playback state would flicker in and out across refreshes as its duration
+     * fluctuated. A regular video with the same mid-progress state is used as a control: it MUST be
+     * filtered out when partially-played streams are hidden, proving only live streams are exempt.
+     */
+    @Test
+    fun testGetStreams_liveStreamShownRegardlessOfPlaybackFilters() {
+        db.clearAllTables()
+        val subId = subscriptionDAO.insertAll(listOf(youtubeSub("1"))).first()
+
+        val ids = streamDAO.insertAll(
+            listOf(
+                streamEntity(StreamType.LIVE_STREAM, 7200, "https://youtube.com/watch?v=live"),
+                streamEntity(StreamType.VIDEO_STREAM, 7200, "https://youtube.com/watch?v=video")
+            )
+        )
+        val liveId = ids[0]
+        val videoId = ids[1]
+        feedDAO.insertAll(listOf(FeedEntity(liveId, subId), FeedEntity(videoId, subId)))
+
+        // Mid-progress playback state + history on both, so the played/partially-played filter
+        // blocks are actually engaged (otherwise NULL state/history short-circuits to "keep").
+        val now = OffsetDateTime.now()
+        for (id in ids) {
+            streamStateDAO.insert(StreamStateEntity(id, 3_600_000))
+            streamHistoryDAO.insert(StreamHistoryEntity(id, now, 1))
+        }
+
+        val playedPartial = feedStreamUids(includePlayed = true, includePartiallyPlayed = true)
+        val playedNoPartial = feedStreamUids(includePlayed = true, includePartiallyPlayed = false)
+        val noPlayedPartial = feedStreamUids(includePlayed = false, includePartiallyPlayed = true)
+        val noPlayedNoPartial = feedStreamUids(includePlayed = false, includePartiallyPlayed = false)
+
+        // The live stream is present in every combination of the two playback filters.
+        assertTrue(playedPartial.contains(liveId))
+        assertTrue(playedNoPartial.contains(liveId))
+        assertTrue(noPlayedPartial.contains(liveId))
+        assertTrue(noPlayedNoPartial.contains(liveId))
+
+        // Control: the regular video disappears whenever partially-played streams are hidden,
+        // confirming the exemption is specific to live streams and normal filtering still works.
+        assertTrue(playedPartial.contains(videoId))
+        assertFalse(playedNoPartial.contains(videoId))
+        assertFalse(noPlayedNoPartial.contains(videoId))
+    }
+
+    /**
+     * Regression for defect C: the oldest-update query must return NULL when any subscription has
+     * never been (successfully) updated, instead of silently ignoring NULLs via `MIN()`. This keeps
+     * the "last updated" header honest about failures and consistent with [FeedDAO.notLoadedCount].
+     */
+    @Test
+    fun testOldestSubscriptionUpdate_nullWhenAnyNotUpdated() {
+        db.clearAllTables()
+        val ids = subscriptionDAO.insertAll(
+            listOf(youtubeSub("1"), youtubeSub("2"), youtubeSub("3"))
+        )
+
+        val t1 = OffsetDateTime.parse("2023-01-01T00:00:00Z")
+        val t2 = OffsetDateTime.parse("2023-02-01T00:00:00Z")
+        feedDAO.setLastUpdatedForSubscription(FeedLastUpdatedEntity(ids[0], t1))
+        feedDAO.setLastUpdatedForSubscription(FeedLastUpdatedEntity(ids[1], t2))
+        feedDAO.setLastUpdatedForSubscription(FeedLastUpdatedEntity(ids[2], null))
+
+        // One subscription is not updated → the whole result must collapse to NULL.
+        assertNull(feedDAO.oldestSubscriptionUpdateFromAll().blockingFirst().firstOrNull())
+
+        // Once every subscription has a timestamp, the oldest one is returned again.
+        feedDAO.setLastUpdatedForSubscription(
+            FeedLastUpdatedEntity(ids[2], OffsetDateTime.parse("2023-03-01T00:00:00Z"))
+        )
+        assertEquals(t1, feedDAO.oldestSubscriptionUpdateFromAll().blockingFirst().firstOrNull())
+    }
+
+    /**
+     * Regression for defects C/D: after a subscription is marked outdated (last_updated = NULL,
+     * as the load pipeline does on failure), all three views of its state must agree — it is
+     * reported as outdated, counted as not-loaded, and forces the oldest-update result to NULL.
+     */
+    @Test
+    fun testFailedSubscription_consistentAcrossOutdatedCountAndOldest() {
+        db.clearAllTables()
+        val subId = subscriptionDAO.insertAll(listOf(youtubeSub("1"))).first()
+
+        // Simulate a successful update followed by a failure (markAsOutdated → NULL).
+        feedDAO.setLastUpdatedForSubscription(FeedLastUpdatedEntity(subId, OffsetDateTime.now()))
+        feedDAO.setLastUpdatedForSubscription(FeedLastUpdatedEntity(subId, null))
+
+        assertEquals(1, feedDAO.getAllOutdated(OffsetDateTime.now()).blockingFirst().size)
+        assertEquals(1L, feedDAO.notLoadedCount().blockingFirst())
+        assertNull(feedDAO.oldestSubscriptionUpdateFromAll().blockingFirst().firstOrNull())
+    }
+
+    private fun feedStreamUids(
+        includePlayed: Boolean,
+        includePartiallyPlayed: Boolean
+    ): Set<Long> {
+        return feedDAO.getStreams(
+            FeedGroupEntity.GROUP_ALL_ID,
+            includePlayed,
+            includePartiallyPlayed,
+            null
+        )
+            .blockingGet()!!
+            .map { it.stream.uid }
+            .toSet()
+    }
+
+    private fun youtubeSub(id: String) = SubscriptionEntity.from(
+        ChannelInfo(
+            serviceId,
+            id,
+            "https://youtube.com/channel/$id",
+            "https://youtube.com/channel/$id",
+            "channel-$id"
+        )
+    )
+
+    private fun streamEntity(type: StreamType, durationSeconds: Long, url: String) = StreamEntity(
+        0,
+        serviceId,
+        url,
+        "title",
+        type,
+        durationSeconds,
+        "uploader",
+        "https://youtube.com/channel/x",
+        "https://i.ytimg.com/vi/x/hqdefault.jpg",
+        100,
+        "2023-01-01",
+        OffsetDateTime.parse("2023-01-01T00:00:00Z")
+    )
 }
