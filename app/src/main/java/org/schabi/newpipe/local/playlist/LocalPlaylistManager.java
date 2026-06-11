@@ -22,7 +22,8 @@ import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 
 public class LocalPlaylistManager {
-    private static final long THUMBNAIL_ID_LEAVE_UNCHANGED = -2;
+    /** Sentinel: do not touch the thumbnail when passed to {@link #saveImmediate}. */
+    public static final long THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED = -2;
 
     private final AppDatabase database;
     private final StreamDAO streamTable;
@@ -80,6 +81,27 @@ public class LocalPlaylistManager {
     }
 
     public Completable updateJoin(final long playlistId, final List<Long> streamIds) {
+        return saveImmediate(playlistId, streamIds, THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED);
+    }
+
+    /**
+     * Atomically replace all join rows for the given playlist with {@code streamIds}
+     * (re-indexed from 0) and, optionally, update the thumbnail stream id — all inside
+     * a single database transaction.
+     *
+     * <p>Pass {@link #THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED} as {@code newThumbnailStreamId}
+     * to leave the thumbnail untouched.  Pass {@link PlaylistEntity#DEFAULT_THUMBNAIL_ID}
+     * (-1) to reset the thumbnail (e.g. when the playlist becomes empty).</p>
+     *
+     * @param playlistId          the playlist to update
+     * @param streamIds           ordered list of stream ids that should remain
+     * @param newThumbnailStreamId new thumbnail stream id, or
+     *                             {@link #THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED}
+     * @return a {@link Completable} that completes when the transaction is done
+     */
+    public Completable saveImmediate(final long playlistId,
+                                     final List<Long> streamIds,
+                                     final long newThumbnailStreamId) {
         final List<PlaylistStreamEntity> joinEntities = new ArrayList<>(streamIds.size());
         for (int i = 0; i < streamIds.size(); i++) {
             joinEntities.add(new PlaylistStreamEntity(playlistId, streamIds.get(i), i));
@@ -88,6 +110,18 @@ public class LocalPlaylistManager {
         return Completable.fromRunnable(() -> database.runInTransaction(() -> {
             playlistStreamTable.deleteBatch(playlistId);
             playlistStreamTable.insertAll(joinEntities);
+
+            if (newThumbnailStreamId != THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED) {
+                final List<PlaylistEntity> rows =
+                        playlistTable.getPlaylist(playlistId).blockingFirst();
+                if (!rows.isEmpty()) {
+                    final PlaylistEntity playlist = rows.get(0);
+                    playlist.setThumbnailStreamId(newThumbnailStreamId);
+                    // Thumbnail change from cleanup is always automatic (not permanent)
+                    playlist.setThumbnailPermanent(false);
+                    playlistTable.update(playlist);
+                }
+            }
         })).subscribeOn(Schedulers.io());
     }
 
@@ -133,7 +167,7 @@ public class LocalPlaylistManager {
     }
 
     public Maybe<Integer> renamePlaylist(final long playlistId, final String name) {
-        return modifyPlaylist(playlistId, name, THUMBNAIL_ID_LEAVE_UNCHANGED, false);
+        return modifyPlaylist(playlistId, name, THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED, false);
     }
 
     public Maybe<Integer> changePlaylistThumbnail(final long playlistId,
@@ -172,7 +206,7 @@ public class LocalPlaylistManager {
                     if (name != null) {
                         playlist.setName(name);
                     }
-                    if (thumbnailStreamId != THUMBNAIL_ID_LEAVE_UNCHANGED) {
+                    if (thumbnailStreamId != THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED) {
                         playlist.setThumbnailStreamId(thumbnailStreamId);
                         playlist.setThumbnailPermanent(isPermanent);
                     }

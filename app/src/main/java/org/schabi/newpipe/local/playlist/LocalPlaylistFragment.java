@@ -75,6 +75,7 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
+import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import io.reactivex.rxjava3.disposables.Disposable;
@@ -471,30 +472,53 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
                 });
 
         disposables.add(streamsMaybe.subscribeOn(Schedulers.io())
+                .defaultIfEmpty(new Pair<>(new ArrayList<>(), false))
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(flow -> {
+                .flatMap(flow -> {
                     final List<PlaylistStreamEntry> itemsToKeep = flow.first;
                     final boolean thumbnailVideoRemoved = flow.second;
 
                     itemListAdapter.clearStreamItemList();
                     itemListAdapter.addItems(itemsToKeep);
-                    debounceSaver.setHasChangesToSave();
-                    saveImmediate();
-
-                    if (thumbnailVideoRemoved) {
-                        updateThumbnailUrl();
-                    }
-
-                    final long videoCount = itemListAdapter.getItemsList().size();
                     setStreamCountAndOverallDuration(itemListAdapter.getItemsList());
-                    if (videoCount == 0) {
-                        showEmptyState();
+
+                    // Determine the new thumbnail inside the same transaction so that
+                    // cover and order can never drift apart.
+                    final long newThumbnailStreamId;
+                    if (thumbnailVideoRemoved) {
+                        // thumbnailVideoRemoved is only true when !isThumbnailPermanent
+                        newThumbnailStreamId = itemsToKeep.isEmpty()
+                                ? PlaylistEntity.DEFAULT_THUMBNAIL_ID
+                                : itemsToKeep.get(0).getStreamEntity().getUid();
+                    } else {
+                        newThumbnailStreamId =
+                                LocalPlaylistManager.THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED;
                     }
 
+                    final List<Long> streamIds = new ArrayList<>(itemsToKeep.size());
+                    for (final PlaylistStreamEntry entry : itemsToKeep) {
+                        streamIds.add(entry.getStreamId());
+                    }
+
+                    return playlistManager
+                            .saveImmediate(playlistId, streamIds, newThumbnailStreamId)
+                            .observeOn(AndroidSchedulers.mainThread())
+                            .toMaybe();
+                })
+                .doFinally(() -> {
                     hideLoading();
                     isRewritingPlaylist = false;
-                }, throwable -> showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
-                        "Removing watched videos, partially watched=" + removePartiallyWatched))));
+                })
+                .subscribe(ignored -> {
+                    debounceSaver.setNoChangesToSave();
+                    if (itemListAdapter.getItemsList().isEmpty()) {
+                        showEmptyState();
+                    }
+                }, throwable -> {
+                    showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
+                            "Removing watched videos, partially watched="
+                                    + removePartiallyWatched));
+                }));
     }
 
     @Override
@@ -640,22 +664,36 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
         showLoading();
 
         final var streamsMaybe = playlistManager
-                .getDistinctPlaylistStreams(playlistId).firstElement();
+                .getDistinctPlaylistStreams(playlistId).firstElement()
+                .defaultIfEmpty(new ArrayList<>());
 
 
         disposables.add(streamsMaybe.subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(itemsToKeep -> {
+                .flatMap(itemsToKeep -> {
                     itemListAdapter.clearStreamItemList();
                     itemListAdapter.addItems(itemsToKeep);
                     setStreamCountAndOverallDuration(itemListAdapter.getItemsList());
-                    debounceSaver.setHasChangesToSave();
-                    saveImmediate();
 
+                    final List<Long> streamIds = new ArrayList<>(itemsToKeep.size());
+                    for (final PlaylistStreamEntry entry : itemsToKeep) {
+                        streamIds.add(entry.getStreamId());
+                    }
+
+                    return playlistManager
+                            .saveImmediate(playlistId, streamIds,
+                                    LocalPlaylistManager.THUMBNAIL_STREAM_ID_LEAVE_UNCHANGED)
+                            .observeOn(AndroidSchedulers.mainThread())
+                            .toMaybe();
+                })
+                .doFinally(() -> {
                     hideLoading();
                     isRewritingPlaylist = false;
-                }, throwable -> showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
-                        "Removing duplicated streams"))));
+                })
+                .subscribe(ignored -> debounceSaver.setNoChangesToSave(),
+                        throwable -> showError(new ErrorInfo(throwable,
+                                UserAction.REQUESTED_BOOKMARK,
+                                "Removing duplicated streams"))));
     }
 
     private void deleteItem(final PlaylistStreamEntry item) {
