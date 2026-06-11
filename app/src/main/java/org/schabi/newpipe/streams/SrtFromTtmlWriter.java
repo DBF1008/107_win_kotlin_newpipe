@@ -313,7 +313,12 @@ public class SrtFromTtmlWriter {
             // Recursively extract text from all child nodes
             extractText(paragraph, text);
 
-            if (ignoreEmptyFrames && text.length() < 1) {
+            // A paragraph that collapses to only whitespace - e.g. one made up
+            // solely of <br/> tags or newline entities like &#xA; - is visually
+            // empty. Writing it would consume a subtitle index and leave a blank
+            // cue, drifting the timeline out of sync with the remaining text.
+            // Skip such frames so the SRT indices stay contiguous.
+            if (ignoreEmptyFrames && text.toString().isBlank()) {
                 continue;
             }
 

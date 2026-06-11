@@ -6,7 +6,10 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
 import org.jsoup.parser.Parser;
+import org.schabi.newpipe.streams.io.SharpStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import static org.junit.Assert.assertEquals;
@@ -316,5 +319,284 @@ public class SrtFromTtmlWriterTest {
         final String expected = "++";
         final String actual = extractTextFromTtml(NON_SPACING_TTML);
         assertEquals(expected, actual);
+    }
+
+    // ------------------------------------------------------------------
+    // build() end-to-end tests: empty-frame strategy + SRT numbering.
+    //
+    // These drive the public build() entry point (TTML byte stream in,
+    // SRT byte stream out) so they cover what extractText() alone can't:
+    // that visually-empty frames are dropped and that the remaining
+    // frames keep contiguous, 1-based indices.
+    // ------------------------------------------------------------------
+
+    /**
+     * A paragraph made of a single {@code <br/>} collapses to a line break
+     * only. With ignoreEmptyFrames it must be dropped, and the following
+     * content frame must still get index 2 (not 3).
+     */
+    @Test
+    public void testBuildSkipsBrOnlyFrameAndKeepsNumberingContiguous() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\"><br/></p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">World</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "Hello")
+                + srtFrame(2, "00:00:03,000", "00:00:04,000", "World");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * A paragraph containing only newline entities ({@code &#xA;}) is the
+     * exact case that used to slip through the old length-based check.
+     */
+    @Test
+    public void testBuildSkipsNewlineEntityOnlyFrame() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\">&#xA;&#xA;</p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">World</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "Hello")
+                + srtFrame(2, "00:00:03,000", "00:00:04,000", "World");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * Newline entities mixed across nested tags plus a {@code <br/>} still
+     * collapse to whitespace only and must be dropped.
+     */
+    @Test
+    public void testBuildSkipsNestedTagsBlankFrame() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\">"
+                + "<span>&#xA;</span><br/><span>&#xD;</span></p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">World</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "Hello")
+                + srtFrame(2, "00:00:03,000", "00:00:04,000", "World");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * A frame that mixes nested tags, a {@code <br/>} and a newline entity
+     * but also has visible text is kept, with both kinds of line break
+     * normalized to the SRT new line.
+     */
+    @Test
+    public void testBuildKeepsContentWithInlineNewlines() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:03.000\">"
+                + "<span>Hello</span><br/><span>World&#xA;Second</span></p>";
+
+        final String expected = srtFrame(1, "00:00:01,000", "00:00:03,000",
+                "Hello" + NEW_LINE + "World" + NEW_LINE + "Second");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * A paragraph that is only spaces (no line breaks) is visually empty
+     * too and must be dropped when ignoreEmptyFrames is enabled.
+     */
+    @Test
+    public void testBuildSkipsWhitespaceOnlyFrame() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\">   </p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">World</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "Hello")
+                + srtFrame(2, "00:00:03,000", "00:00:04,000", "World");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * With ignoreEmptyFrames disabled the blank frame is preserved as-is
+     * and keeps its index, so numbering runs 1, 2, 3 (backward compatible).
+     */
+    @Test
+    public void testBuildKeepsBlankFramesWhenNotIgnoring() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">Hello</p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\"><br/></p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">World</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "Hello")
+                + srtFrame(2, "00:00:02,500", "00:00:03,000", NEW_LINE)
+                + srtFrame(3, "00:00:03,000", "00:00:04,000", "World");
+
+        assertEquals(expected, runBuild(paragraphs, false));
+    }
+
+    /**
+     * Several consecutive blank frames are all skipped, and the indices of
+     * the surrounding content frames stay contiguous (1, 2).
+     */
+    @Test
+    public void testBuildSkipsMultipleConsecutiveBlankFrames() throws IOException {
+        final String paragraphs =
+                "<p begin=\"00:00:01.000\" end=\"00:00:02.000\">A</p>"
+                + "<p begin=\"00:00:02.000\" end=\"00:00:02.500\"><br/></p>"
+                + "<p begin=\"00:00:02.500\" end=\"00:00:03.000\">&#xA;</p>"
+                + "<p begin=\"00:00:03.000\" end=\"00:00:04.000\">B</p>";
+
+        final String expected =
+                srtFrame(1, "00:00:01,000", "00:00:02,000", "A")
+                + srtFrame(2, "00:00:03,000", "00:00:04,000", "B");
+
+        assertEquals(expected, runBuild(paragraphs, true));
+    }
+
+    /**
+     * Runs the full TTML to SRT conversion through {@link SrtFromTtmlWriter#build}
+     * using in-memory streams and returns the produced SRT as a UTF-8 string.
+     *
+     * @param paragraphs the {@code <p>} elements to wrap inside a TTML body
+     * @param ignoreEmptyFrames whether empty frames should be skipped
+     * @return the produced SRT output decoded as UTF-8
+     * @throws IOException if the writer fails
+     */
+    private static String runBuild(final String paragraphs, final boolean ignoreEmptyFrames)
+            throws IOException {
+        final String ttml = TTML_WRAPPER_START + paragraphs + TTML_WRAPPER_END;
+        final MemoryStream input = new MemoryStream(ttml.getBytes(StandardCharsets.UTF_8));
+        final MemoryStream output = new MemoryStream();
+        final SrtFromTtmlWriter writer = new SrtFromTtmlWriter(output, ignoreEmptyFrames);
+        writer.build(input);
+        return output.writtenUtf8();
+    }
+
+    /**
+     * Builds the expected SRT representation of a single frame, mirroring
+     * the layout written by {@code SrtFromTtmlWriter.writeFrame}.
+     *
+     * @param index the 1-based subtitle index
+     * @param begin the begin timestamp (comma decimal separator)
+     * @param end the end timestamp (comma decimal separator)
+     * @param text the frame text
+     * @return the SRT block for this frame, including the trailing blank line
+     */
+    private static String srtFrame(final int index, final String begin, final String end,
+                                   final String text) {
+        return index + NEW_LINE
+                + begin + " --> " + end + NEW_LINE
+                + text + NEW_LINE
+                + NEW_LINE;
+    }
+
+    /**
+     * Minimal in-memory {@link SharpStream} for tests: it reads from a fixed
+     * byte array and accumulates written bytes into a buffer that can be read
+     * back as UTF-8. Only the behavior exercised by {@code build()} is needed.
+     */
+    private static final class MemoryStream extends SharpStream {
+        private final byte[] readBuffer;
+        private final ByteArrayOutputStream writeBuffer = new ByteArrayOutputStream();
+        private int position;
+
+        MemoryStream(final byte[] data) {
+            this.readBuffer = data;
+        }
+
+        MemoryStream() {
+            this.readBuffer = new byte[0];
+        }
+
+        String writtenUtf8() {
+            return new String(writeBuffer.toByteArray(), StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public int read() {
+            if (position >= readBuffer.length) {
+                return -1;
+            }
+            return readBuffer[position++] & 0xFF;
+        }
+
+        @Override
+        public int read(final byte[] buffer) {
+            return read(buffer, 0, buffer.length);
+        }
+
+        @Override
+        public int read(final byte[] buffer, final int offset, final int count) {
+            if (position >= readBuffer.length) {
+                return -1;
+            }
+            final int toRead = Math.min(count, readBuffer.length - position);
+            System.arraycopy(readBuffer, position, buffer, offset, toRead);
+            position += toRead;
+            return toRead;
+        }
+
+        @Override
+        public long skip(final long amount) {
+            final long skipped = Math.min(amount, readBuffer.length - position);
+            position += (int) skipped;
+            return skipped;
+        }
+
+        @Override
+        public long available() {
+            return readBuffer.length - position;
+        }
+
+        @Override
+        public void rewind() {
+            position = 0;
+        }
+
+        @Override
+        public boolean isClosed() {
+            return false;
+        }
+
+        @Override
+        public void close() {
+            // No resources to release for the in-memory stream.
+        }
+
+        @Override
+        public boolean canRewind() {
+            return true;
+        }
+
+        @Override
+        public boolean canRead() {
+            return true;
+        }
+
+        @Override
+        public boolean canWrite() {
+            return true;
+        }
+
+        @Override
+        public void write(final byte value) {
+            writeBuffer.write(value);
+        }
+
+        @Override
+        public void write(final byte[] buffer) {
+            writeBuffer.write(buffer, 0, buffer.length);
+        }
+
+        @Override
+        public void write(final byte[] buffer, final int offset, final int count) {
+            writeBuffer.write(buffer, offset, count);
+        }
     }
 }
