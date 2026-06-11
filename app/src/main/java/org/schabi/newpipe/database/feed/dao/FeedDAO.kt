@@ -124,7 +124,7 @@ abstract class FeedDAO {
     @Query(
         """
         DELETE FROM feed
-        
+
         WHERE feed.subscription_id = :subscriptionId
 
         AND feed.stream_id IN (
@@ -138,6 +138,27 @@ abstract class FeedDAO {
         """
     )
     abstract fun unlinkOldLivestreams(subscriptionId: Long)
+
+    /**
+     * Atomically replaces live-stream feed entries for a subscription with
+     * the given feed entities and updates the last-updated timestamp.
+     *
+     * Wrapping unlink + insert + timestamp in a single transaction prevents
+     * intermediate reactive-query emissions that would otherwise make live
+     * streams (and re-upserted streams) temporarily disappear from the feed.
+     */
+    @Transaction
+    open fun upsertFeedItems(
+        subscriptionId: Long,
+        feedEntities: List<FeedEntity>,
+        lastUpdated: FeedLastUpdatedEntity
+    ) {
+        unlinkOldLivestreams(subscriptionId)
+        if (feedEntities.isNotEmpty()) {
+            insertAll(feedEntities)
+        }
+        setLastUpdatedForSubscription(lastUpdated)
+    }
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract fun insert(feedEntity: FeedEntity)

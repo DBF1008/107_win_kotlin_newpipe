@@ -79,28 +79,49 @@ class FeedViewModel(
         .subscribeOn(Schedulers.io())
         .observeOn(Schedulers.io())
         .map { (event, showPlayedItems, showPartiallyPlayedItems, showFutureItems, notLoadedCount, oldestUpdate) ->
-            val streamItems = if (event is SuccessResultEvent || event is IdleEvent) {
-                feedDatabaseManager
-                    .getStreams(groupId, showPlayedItems, showPartiallyPlayedItems, showFutureItems)
-                    .blockingGet(arrayListOf())
-            } else {
-                arrayListOf()
+            val streamItems = when (event) {
+                is SuccessResultEvent, is IdleEvent ->
+                    feedDatabaseManager
+                        .getStreams(groupId, showPlayedItems, showPartiallyPlayedItems, showFutureItems)
+                        .blockingGet(arrayListOf())
+                // During progress keep the previous result — returning an
+                // empty list here would wipe the items every time a
+                // background Flowable (notLoadedCount, oldestUpdate)
+                // re-triggers combineLatest while a refresh is running.
+                is ProgressEvent -> null
+                is ErrorResultEvent ->
+                    feedDatabaseManager
+                        .getStreams(groupId, showPlayedItems, showPartiallyPlayedItems, showFutureItems)
+                        .blockingGet(arrayListOf())
             }
 
             CombineResultDataHolder(event, streamItems, notLoadedCount, oldestUpdate)
         }
         .observeOn(AndroidSchedulers.mainThread())
         .subscribe { (event, listFromDB, notLoadedCount, oldestUpdate) ->
+            // A null list signals "no change" — reuse whatever the UI is
+            // currently showing so that progress updates don't blank the
+            // list.
+            val currentItems = (mutableStateLiveData.value as? FeedState.LoadedState)
+                ?.items.orEmpty()
+            val items = listFromDB?.map { e -> StreamItem(e) } ?: currentItems
+
             mutableStateLiveData.postValue(
                 when (event) {
-                    is IdleEvent -> FeedState.LoadedState(listFromDB.map { e -> StreamItem(e) }, oldestUpdate, notLoadedCount, listOf())
+                    is IdleEvent -> FeedState.LoadedState(items, oldestUpdate, notLoadedCount, listOf())
                     is ProgressEvent -> FeedState.ProgressState(event.currentProgress, event.maxProgress, event.progressMessage)
-                    is SuccessResultEvent -> FeedState.LoadedState(listFromDB.map { e -> StreamItem(e) }, oldestUpdate, notLoadedCount, event.itemsErrors)
+                    is SuccessResultEvent -> FeedState.LoadedState(items, oldestUpdate, notLoadedCount, event.itemsErrors)
                     is ErrorResultEvent -> FeedState.ErrorState(event.error)
                 }
             )
 
-            if (event is ErrorResultEvent || event is SuccessResultEvent) {
+            // Only reset after a full error so that the event stream
+            // returns to IdleEvent.  After a *successful* refresh we keep
+            // the SuccessResultEvent alive so that partial errors
+            // (itemsErrors) remain visible and failed subscriptions —
+            // whose last_updated was set to null by markAsOutdated() —
+            // keep their outdated indicator until the next refresh.
+            if (event is ErrorResultEvent) {
                 FeedEventManager.reset()
             }
         }
@@ -121,7 +142,7 @@ class FeedViewModel(
 
     private data class CombineResultDataHolder(
         val t1: FeedEventManager.Event,
-        val t2: List<StreamWithState>,
+        val t2: List<StreamWithState>?,
         val t3: Long,
         val t4: OffsetDateTime?
     )

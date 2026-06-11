@@ -95,19 +95,28 @@ class FeedDatabaseManager(context: Context) {
             }
         }
 
-        feedTable.unlinkOldLivestreams(subscriptionId)
+        val lastUpdatedEntity = FeedLastUpdatedEntity(
+            subscriptionId, OffsetDateTime.now(ZoneOffset.UTC)
+        )
 
-        if (itemsToInsert.isNotEmpty()) {
+        if (itemsToInsert.isEmpty()) {
+            // No streams to insert — still need to clear stale live-stream
+            // entries and stamp the subscription as refreshed, atomically.
+            feedTable.upsertFeedItems(subscriptionId, emptyList(), lastUpdatedEntity)
+            return
+        }
+
+        // Wrap the entire stream-upsert + feed-table mutation in a single
+        // SQLite transaction so that Room defers all reactive-query
+        // notifications until the transaction commits.  This prevents
+        // intermediate states (e.g. live streams deleted but not yet
+        // re-inserted) from being visible to the UI.
+        database.runInTransaction {
             val streamEntities = itemsToInsert.map { StreamEntity(it) }
             val streamIds = streamTable.upsertAll(streamEntities)
             val feedEntities = streamIds.map { FeedEntity(it, subscriptionId) }
-
-            feedTable.insertAll(feedEntities)
+            feedTable.upsertFeedItems(subscriptionId, feedEntities, lastUpdatedEntity)
         }
-
-        feedTable.setLastUpdatedForSubscription(
-            FeedLastUpdatedEntity(subscriptionId, OffsetDateTime.now(ZoneOffset.UTC))
-        )
     }
 
     fun removeOrphansOrOlderStreams(oldestAllowedDate: OffsetDateTime = FEED_OLDEST_ALLOWED_DATE) {
