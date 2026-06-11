@@ -275,6 +275,9 @@ public abstract class PlayQueue implements Serializable {
      * @param items {@link PlayQueueItem}s to append
      */
     public synchronized void append(@NonNull final List<PlayQueueItem> items) {
+        if (items.isEmpty()) {
+            return;
+        }
         final List<PlayQueueItem> itemList = new ArrayList<>(items);
 
         if (isShuffled()) {
@@ -283,7 +286,16 @@ public abstract class PlayQueue implements Serializable {
         }
         if (!streams.isEmpty() && streams.get(streams.size() - 1).isAutoQueued()
                 && !itemList.get(0).isAutoQueued()) {
-            streams.remove(streams.size() - 1);
+            final int removedIndex = streams.size() - 1;
+            final PlayQueueItem removedItem = streams.get(removedIndex);
+            streams.remove(removedIndex);
+            if (backup != null) {
+                backup.remove(removedItem);
+            }
+            history.remove(removedItem);
+            if (queueIndex.get() >= streams.size()) {
+                queueIndex.set(Math.max(0, streams.size() - 1));
+            }
         }
         streams.addAll(itemList);
 
@@ -296,14 +308,18 @@ public abstract class PlayQueue implements Serializable {
      * @param item item to add.
      * @param skipIfSame if set, skip adding if the next stream is the same stream.
      */
-    public void enqueueNext(@NonNull final PlayQueueItem item, final boolean skipIfSame) {
+    public synchronized void enqueueNext(@NonNull final PlayQueueItem item,
+                                         final boolean skipIfSame) {
+        if (isEmpty()) {
+            return;
+        }
         final int currentIndex = getIndex();
         // if the next item is the same item as the one we want to enqueue, skip if flag is true
         if (skipIfSame && item.isSameItem(getItem(currentIndex + 1))) {
             return;
         }
         append(List.of(item));
-        move(size() - 1, currentIndex + 1);
+        moveInternal(size() - 1, currentIndex + 1);
     }
 
     /**
@@ -346,13 +362,13 @@ public abstract class PlayQueue implements Serializable {
         final int currentIndex = queueIndex.get();
         final int size = size();
 
-        if (currentIndex > removeIndex) {
+        if (size <= 1) {
+            // Removing the last (or only) item
+            queueIndex.set(0);
+        } else if (currentIndex > removeIndex) {
             queueIndex.decrementAndGet();
-
-        } else if (currentIndex >= size) {
-            queueIndex.set(currentIndex % (size - 1));
-
         } else if (currentIndex == removeIndex && currentIndex == size - 1) {
+            // Removing the currently playing last item
             queueIndex.set(0);
         }
 
@@ -360,7 +376,8 @@ public abstract class PlayQueue implements Serializable {
             backup.remove(getItem(removeIndex));
         }
 
-        history.remove(streams.remove(removeIndex));
+        final PlayQueueItem removed = streams.remove(removeIndex);
+        history.remove(removed);
         if (streams.size() > queueIndex.get()) {
             history.add(streams.get(queueIndex.get()));
         }
@@ -387,6 +404,15 @@ public abstract class PlayQueue implements Serializable {
             return;
         }
 
+        moveInternal(source, target);
+        streams.get(target).setAutoQueued(false);
+    }
+
+    private synchronized void moveInternal(final int source, final int target) {
+        if (source == target) {
+            return;
+        }
+
         final int current = getIndex();
         if (source == current) {
             queueIndex.set(target);
@@ -397,7 +423,6 @@ public abstract class PlayQueue implements Serializable {
         }
 
         final PlayQueueItem playQueueItem = streams.remove(source);
-        playQueueItem.setAutoQueued(false);
         streams.add(target, playQueueItem);
         broadcast(new MoveEvent(source, target));
     }
