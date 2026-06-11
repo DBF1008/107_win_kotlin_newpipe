@@ -140,6 +140,29 @@ public class SrtFromTtmlWriter {
         return cleaned;
     }
 
+    /**
+     * Collapse two or more consecutive SRT newlines ({@code \r\n})
+     * into a single one.
+     *
+     * <p>When TTML paragraphs contain both {@code <br/>} tags and
+     * newline entities (e.g., {@code &#xA;}), or when nested tags
+     * produce redundant line breaks, the extraction step generates
+     * multiple consecutive {@code \r\n} sequences. In SRT subtitle
+     * text, blank lines within a single subtitle block are generally
+     * undesirable — they create visual gaps and may confuse players.
+     * This method collapses them into a single line break.</p>
+     *
+     * <p>Example: {@code "Line1\r\n\r\n\r\nLine2"} →
+     * {@code "Line1\r\nLine2"}</p>
+     *
+     * @param text the text potentially containing consecutive newlines
+     * @return text where 2+ consecutive {@code \r\n} are replaced
+     *         by a single {@code \r\n}
+     */
+    private String collapseConsecutiveNewlines(final String text) {
+        return text.replaceAll("(\\r\\n){2,}", NEW_LINE);
+    }
+
     private String normalizeForSrt(final String actualText) {
         String cleaned = actualText;
 
@@ -313,14 +336,30 @@ public class SrtFromTtmlWriter {
             // Recursively extract text from all child nodes
             extractText(paragraph, text);
 
-            if (ignoreEmptyFrames && text.length() < 1) {
+            // Post-extraction normalization for the SRT output:
+            //
+            // 1. Trim leading/trailing whitespace and newlines.
+            //    After extraction, paragraphs containing only newline
+            //    entities (e.g., &#xA;, &#xD;) or <br/> tags produce
+            //    text like "\r\n", which has length > 0 but is
+            //    effectively empty. Trimming reduces it to "", so the
+            //    empty-frame check below works correctly.
+            //
+            // 2. Collapse consecutive \r\n into a single \r\n.
+            //    When nested tags mix <br/> and newline entities,
+            //    redundant blank lines appear inside the subtitle
+            //    text. Collapsing keeps the output clean.
+            String extractedText = text.toString().trim();
+            extractedText = collapseConsecutiveNewlines(extractedText);
+
+            if (ignoreEmptyFrames && extractedText.isEmpty()) {
                 continue;
             }
 
             final String begin = getTimestamp(paragraph, "begin");
             final String end = getTimestamp(paragraph, "end");
 
-            writeFrame(begin, end, text);
+            writeFrame(begin, end, new StringBuilder(extractedText));
         }
     }
 }
