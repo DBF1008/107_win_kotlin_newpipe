@@ -43,6 +43,12 @@ public class PlayQueueTest {
         return new PlayQueueItem(infoItem);
     }
 
+    static PlayQueueItem makeAutoQueuedItemWithUrl(final String url) {
+        final PlayQueueItem item = makeItemWithUrl(url);
+        item.setAutoQueued(true);
+        return item;
+    }
+
     public static class SetIndexTests {
         private static final int SIZE = 5;
         private PlayQueue nonEmptyQueue;
@@ -197,6 +203,124 @@ public class PlayQueueTest {
             final PlayQueue queue1 = makePlayQueue(0, streams1);
             final PlayQueue queue2 = makePlayQueue(0, streams2);
             assertFalse(queue1.equalStreams(queue2));
+        }
+    }
+
+    public static class AppendTests {
+        @Test
+        public void emptyAppendOnNonEmptyQueueIsNoOp() {
+            final PlayQueue queue = makePlayQueue(1, List.of(
+                    makeItemWithUrl("URL_0"),
+                    makeItemWithUrl("URL_1"),
+                    makeItemWithUrl("URL_2")));
+
+            // Appending an empty result (e.g. an external enqueue/autoplay source
+            // that returned nothing) must not crash and must leave the queue intact.
+            queue.append(Collections.emptyList());
+
+            assertEquals(3, queue.size());
+            assertEquals(1, queue.getIndex());
+            assertEquals("URL_1", Objects.requireNonNull(queue.getItem()).getUrl());
+        }
+
+        @Test
+        public void emptyAppendOnEmptyQueueIsNoOp() {
+            final PlayQueue queue = makePlayQueue(0, List.of());
+
+            queue.append(Collections.emptyList());
+
+            assertTrue(queue.isEmpty());
+            assertEquals(0, queue.getIndex());
+        }
+
+        @Test
+        public void appendReplacesTrailingAutoQueuedItem() {
+            final PlayQueue queue = makePlayQueue(0, List.of(
+                    makeItemWithUrl("PLAYING"),
+                    makeAutoQueuedItemWithUrl("AUTO")));
+
+            queue.append(List.of(makeItemWithUrl("REAL")));
+
+            // The stale autoplay item must be dropped and replaced by the real item.
+            assertEquals(2, queue.size());
+            assertEquals("PLAYING", Objects.requireNonNull(queue.getItem(0)).getUrl());
+            assertEquals("REAL", Objects.requireNonNull(queue.getItem(1)).getUrl());
+            // The currently playing item is in front, so the index must stay put.
+            assertEquals(0, queue.getIndex());
+        }
+
+        @Test
+        public void replacingPlayingAutoQueuedItemFixesIndex() {
+            final PlayQueue queue = makePlayQueue(0, List.of(
+                    makeItemWithUrl("FIRST"),
+                    makeAutoQueuedItemWithUrl("AUTO")));
+            // Start playing the auto-queued item.
+            queue.setIndex(1);
+            assertEquals("AUTO", Objects.requireNonNull(queue.getItem()).getUrl());
+
+            queue.append(List.of(makeItemWithUrl("REAL")));
+
+            // The auto-queued item that was playing got removed; the index must
+            // point to a valid item instead of dangling on the replacement / out
+            // of bounds, and the queue must not be left in a dirty state.
+            assertEquals(2, queue.size());
+            assertEquals(0, queue.getIndex());
+            assertEquals("FIRST", Objects.requireNonNull(queue.getItem()).getUrl());
+            assertEquals("REAL", Objects.requireNonNull(queue.getItem(1)).getUrl());
+        }
+
+        @Test
+        public void appendKeepsAutoQueuedWhenNewItemsAreAlsoAutoQueued() {
+            final PlayQueue queue = makePlayQueue(0, List.of(
+                    makeItemWithUrl("PLAYING"),
+                    makeAutoQueuedItemWithUrl("AUTO_1")));
+
+            queue.append(List.of(makeAutoQueuedItemWithUrl("AUTO_2")));
+
+            // Both trailing items are auto-queued, so nothing should be dropped.
+            assertEquals(3, queue.size());
+            assertEquals("AUTO_1", Objects.requireNonNull(queue.getItem(1)).getUrl());
+            assertEquals("AUTO_2", Objects.requireNonNull(queue.getItem(2)).getUrl());
+        }
+    }
+
+    public static class EnqueueNextTests {
+        @Test
+        public void enqueueNextInsertsRightAfterCurrent() {
+            final PlayQueue queue = makePlayQueue(0, List.of(
+                    makeItemWithUrl("A"),
+                    makeItemWithUrl("B"),
+                    makeItemWithUrl("C")));
+
+            queue.enqueueNext(makeItemWithUrl("NEXT"), false);
+
+            assertEquals(4, queue.size());
+            assertEquals(0, queue.getIndex());
+            assertEquals("NEXT", Objects.requireNonNull(queue.getItem(1)).getUrl());
+            assertEquals("B", Objects.requireNonNull(queue.getItem(2)).getUrl());
+        }
+
+        @Test
+        public void enqueueNextSkipsWhenNextIsSameItem() {
+            final PlayQueue queue = makePlayQueue(0, List.of(
+                    makeItemWithUrl("A"),
+                    makeItemWithUrl("DUP")));
+
+            // The item right after the current one is already "DUP"; with skipIfSame
+            // set the enqueue must be a no-op rather than duplicating the entry.
+            queue.enqueueNext(makeItemWithUrl("DUP"), true);
+
+            assertEquals(2, queue.size());
+        }
+
+        @Test
+        public void enqueueNextOnEmptyQueueDoesNotCrash() {
+            final PlayQueue queue = makePlayQueue(0, List.of());
+
+            queue.enqueueNext(makeItemWithUrl("ONLY"), false);
+
+            assertEquals(1, queue.size());
+            assertEquals("ONLY", Objects.requireNonNull(queue.getItem(0)).getUrl());
         }
     }
 }

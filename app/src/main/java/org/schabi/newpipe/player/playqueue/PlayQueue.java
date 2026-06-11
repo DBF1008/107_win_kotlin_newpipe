@@ -277,13 +277,26 @@ public abstract class PlayQueue implements Serializable {
     public synchronized void append(@NonNull final List<PlayQueueItem> items) {
         final List<PlayQueueItem> itemList = new ArrayList<>(items);
 
+        // An external source (an enqueue intent, autoplay suggestions or a partial
+        // background fetch) may hand us an empty result, or one that becomes empty
+        // after invalid entries are filtered out. Bail out early so we neither crash
+        // on itemList.get(0) below nor emit a meaningless append event.
+        if (itemList.isEmpty()) {
+            return;
+        }
+
         if (isShuffled()) {
             backup.addAll(itemList);
             Collections.shuffle(itemList);
         }
+        // If the queue currently ends with an auto-queued (autoplay) item and the
+        // freshly appended content is "real" (not auto-queued), drop the stale
+        // autoplay item so the real items take its place. Go through removeInternal
+        // instead of a raw list removal so the play index, history and shuffle
+        // backup stay consistent and we don't leave a dangling reference behind.
         if (!streams.isEmpty() && streams.get(streams.size() - 1).isAutoQueued()
                 && !itemList.get(0).isAutoQueued()) {
-            streams.remove(streams.size() - 1);
+            removeInternal(streams.size() - 1);
         }
         streams.addAll(itemList);
 
@@ -296,7 +309,8 @@ public abstract class PlayQueue implements Serializable {
      * @param item item to add.
      * @param skipIfSame if set, skip adding if the next stream is the same stream.
      */
-    public void enqueueNext(@NonNull final PlayQueueItem item, final boolean skipIfSame) {
+    public synchronized void enqueueNext(@NonNull final PlayQueueItem item,
+                                         final boolean skipIfSame) {
         final int currentIndex = getIndex();
         // if the next item is the same item as the one we want to enqueue, skip if flag is true
         if (skipIfSame && item.isSameItem(getItem(currentIndex + 1))) {
