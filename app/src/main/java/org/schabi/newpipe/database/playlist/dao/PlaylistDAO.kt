@@ -29,6 +29,17 @@ interface PlaylistDAO : BasicDAO<PlaylistEntity> {
     @Query("SELECT * FROM playlists WHERE uid = :playlistId")
     fun getPlaylist(playlistId: Long): Flowable<MutableList<PlaylistEntity>>
 
+    // Synchronous accessors safe to call inside a database transaction (unlike the Flowable
+    // queries above, which must not be subscribed to while a transaction is held).
+    @Query("SELECT thumbnail_stream_id FROM playlists WHERE uid = :playlistId")
+    fun getThumbnailStreamIdBlocking(playlistId: Long): Long
+
+    @Query("SELECT is_thumbnail_permanent FROM playlists WHERE uid = :playlistId")
+    fun getIsThumbnailPermanentBlocking(playlistId: Long): Boolean
+
+    @Query("UPDATE playlists SET thumbnail_stream_id = :thumbnailStreamId WHERE uid = :playlistId")
+    fun setThumbnailStreamId(playlistId: Long, thumbnailStreamId: Long)
+
     @Query("DELETE FROM playlists WHERE uid = :playlistId")
     fun deletePlaylist(playlistId: Long): Int
 

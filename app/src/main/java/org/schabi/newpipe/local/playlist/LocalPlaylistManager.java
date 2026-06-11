@@ -88,7 +88,39 @@ public class LocalPlaylistManager {
         return Completable.fromRunnable(() -> database.runInTransaction(() -> {
             playlistStreamTable.deleteBatch(playlistId);
             playlistStreamTable.insertAll(joinEntities);
+            reassignThumbnailIfRemoved(playlistId, streamIds);
         })).subscribeOn(Schedulers.io());
+    }
+
+    /**
+     * Keeps the playlist thumbnail consistent with the (new) item order, within the surrounding
+     * transaction. If the thumbnail is user-pinned ({@code isThumbnailPermanent}) it is never
+     * touched. Otherwise, if the stream currently referenced by the thumbnail is no longer part of
+     * {@code streamIds} (e.g. it was just removed), the thumbnail falls back to the new first
+     * stream, or to {@link PlaylistEntity#DEFAULT_THUMBNAIL_ID} when the playlist became empty.
+     *
+     * <p>Because this runs inside the same transaction that rewrites the join table, the order and
+     * the thumbnail are updated atomically: on failure the whole transaction rolls back, so the
+     * persisted state never ends up half-updated.</p>
+     */
+    private void reassignThumbnailIfRemoved(final long playlistId, final List<Long> streamIds) {
+        if (playlistTable.getIsThumbnailPermanentBlocking(playlistId)) {
+            return;
+        }
+
+        final long currentThumbnailId = playlistTable.getThumbnailStreamIdBlocking(playlistId);
+        if (currentThumbnailId != PlaylistEntity.DEFAULT_THUMBNAIL_ID
+                && streamIds.contains(currentThumbnailId)) {
+            // The thumbnail still points to a stream that remains in the playlist.
+            return;
+        }
+
+        final long newThumbnailId = streamIds.isEmpty()
+                ? PlaylistEntity.DEFAULT_THUMBNAIL_ID
+                : streamIds.get(0);
+        if (newThumbnailId != currentThumbnailId) {
+            playlistTable.setThumbnailStreamId(playlistId, newThumbnailId);
+        }
     }
 
     public Completable updatePlaylists(final List<PlaylistMetadataEntry> updateItems,
@@ -140,10 +172,6 @@ public class LocalPlaylistManager {
                                                   final long thumbnailStreamId,
                                                   final boolean isPermanent) {
         return modifyPlaylist(playlistId, null, thumbnailStreamId, isPermanent);
-    }
-
-    public long getPlaylistThumbnailStreamId(final long playlistId) {
-        return playlistTable.getPlaylist(playlistId).blockingFirst().get(0).getThumbnailStreamId();
     }
 
     public boolean getIsPlaylistThumbnailPermanent(final long playlistId) {

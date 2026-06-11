@@ -17,7 +17,6 @@ import android.os.Parcelable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.Log;
-import android.util.Pair;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
@@ -436,11 +435,10 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
         final var streamsMaybe = playlistManager.getPlaylistStreams(playlistId)
                 .firstElement()
                 .zipWith(historyIdsMaybe, (playlist, historyStreamIds) -> {
-                    // Remove Watched, Functionality data
+                    // Remove Watched, Functionality data.
+                    // The playlist thumbnail is kept in sync with the new item order atomically
+                    // by LocalPlaylistManager.updateJoin(), so it is not handled here.
                     final List<PlaylistStreamEntry> itemsToKeep = new ArrayList<>();
-                    final boolean isThumbnailPermanent = playlistManager
-                            .getIsPlaylistThumbnailPermanent(playlistId);
-                    boolean thumbnailVideoRemoved = false;
 
                     final var streamStates = recordManager
                             .loadLocalStreamStateBatch(playlist).blockingGet();
@@ -460,30 +458,19 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
                                 || (!removePartiallyWatched
                                         && !streamStateEntity.isFinished(duration))) {
                             itemsToKeep.add(playlistItem);
-                        } else if (!isThumbnailPermanent && !thumbnailVideoRemoved
-                                && playlistManager.getPlaylistThumbnailStreamId(playlistId)
-                                == playlistItem.getStreamEntity().getUid()) {
-                            thumbnailVideoRemoved = true;
                         }
                     }
 
-                    return new Pair<>(itemsToKeep, thumbnailVideoRemoved);
+                    return itemsToKeep;
                 });
 
         disposables.add(streamsMaybe.subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(flow -> {
-                    final List<PlaylistStreamEntry> itemsToKeep = flow.first;
-                    final boolean thumbnailVideoRemoved = flow.second;
-
+                .subscribe(itemsToKeep -> {
                     itemListAdapter.clearStreamItemList();
                     itemListAdapter.addItems(itemsToKeep);
                     debounceSaver.setHasChangesToSave();
                     saveImmediate();
-
-                    if (thumbnailVideoRemoved) {
-                        updateThumbnailUrl();
-                    }
 
                     final long videoCount = itemListAdapter.getItemsList().size();
                     setStreamCountAndOverallDuration(itemListAdapter.getItemsList());
@@ -493,8 +480,17 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
 
                     hideLoading();
                     isRewritingPlaylist = false;
-                }, throwable -> showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
-                        "Removing watched videos, partially watched=" + removePartiallyWatched))));
+                }, throwable -> {
+                    // Restore an operable state before surfacing the error, otherwise the
+                    // header/controls stay hidden and the menu actions remain disabled.
+                    hideLoading();
+                    isRewritingPlaylist = false;
+                    if (debounceSaver != null) {
+                        debounceSaver.setNoChangesToSave();
+                    }
+                    showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
+                            "Removing watched videos, partially watched=" + removePartiallyWatched));
+                }));
     }
 
     @Override
@@ -605,23 +601,6 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
         disposables.add(disposable);
     }
 
-    private void updateThumbnailUrl() {
-        if (playlistManager.getIsPlaylistThumbnailPermanent(playlistId)) {
-            return;
-        }
-
-        final long thumbnailStreamId;
-
-        if (!itemListAdapter.getItemsList().isEmpty()) {
-            thumbnailStreamId = ((PlaylistStreamEntry) itemListAdapter.getItemsList().get(0))
-                    .getStreamEntity().getUid();
-        } else {
-            thumbnailStreamId = PlaylistEntity.DEFAULT_THUMBNAIL_ID;
-        }
-
-        changeThumbnailStreamId(thumbnailStreamId, false);
-    }
-
     private void openRemoveDuplicatesDialog() {
         new AlertDialog.Builder(this.getActivity())
                 .setTitle(R.string.remove_duplicates_title)
@@ -654,8 +633,17 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
 
                     hideLoading();
                     isRewritingPlaylist = false;
-                }, throwable -> showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
-                        "Removing duplicated streams"))));
+                }, throwable -> {
+                    // Restore an operable state before surfacing the error, otherwise the
+                    // header/controls stay hidden and the menu actions remain disabled.
+                    hideLoading();
+                    isRewritingPlaylist = false;
+                    if (debounceSaver != null) {
+                        debounceSaver.setNoChangesToSave();
+                    }
+                    showError(new ErrorInfo(throwable, UserAction.REQUESTED_BOOKMARK,
+                            "Removing duplicated streams"));
+                }));
     }
 
     private void deleteItem(final PlaylistStreamEntry item) {
@@ -664,10 +652,6 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
         }
 
         itemListAdapter.removeItem(item);
-        if (playlistManager.getPlaylistThumbnailStreamId(playlistId) == item.getStreamId()) {
-            updateThumbnailUrl();
-        }
-
         setStreamCountAndOverallDuration(itemListAdapter.getItemsList());
         debounceSaver.setHasChangesToSave();
         saveImmediate();
@@ -711,8 +695,17 @@ public class LocalPlaylistFragment extends BaseLocalListFragment<List<PlaylistSt
                                 debounceSaver.setNoChangesToSave();
                             }
                         },
-                        throwable -> showError(new ErrorInfo(throwable,
-                                UserAction.REQUESTED_BOOKMARK, "Saving playlist"))
+                        throwable -> {
+                            // The transaction rolled back, so the database keeps its previous,
+                            // consistent state. Clear the modified flag so the next reload is not
+                            // skipped in getPlaylistObserver().onNext() (which would otherwise
+                            // leave the list permanently spinning).
+                            if (debounceSaver != null) {
+                                debounceSaver.setNoChangesToSave();
+                            }
+                            showError(new ErrorInfo(throwable,
+                                    UserAction.REQUESTED_BOOKMARK, "Saving playlist"));
+                        }
                 );
         disposables.add(disposable);
     }
